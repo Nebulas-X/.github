@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 If you believe you have found a security vulnerability in any Nebulas X service or repository, write to
-**contact@nebulas-x.com** with «Security» in the subject. Please do not open a public issue, pull request or discussion.
+**security@nebulas-x.com**. Please do not open a public issue, pull request or discussion.
 
 Include what you can:
 - the affected service, URL or component;

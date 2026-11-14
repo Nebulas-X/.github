@@ -1,6 +1,6 @@
-# Code owners of the public .github (ADR-0017 «Teams»). GitHub reads this file only in this repository. The last
-# matching line wins, so the explicit lines follow the default; each area keeps its own line so that it can get its
-# own owner later (op-0084). nbx-agents is never a code owner.
+# Code owners of the public .github. GitHub reads this file only in this repository. The last matching line wins,
+# so the explicit lines follow the default; each area keeps its own line so that it can get its own owner later.
+# Machine accounts are never code owners.
 
 *                       @Nebulas-X/nbx-maintainers
 

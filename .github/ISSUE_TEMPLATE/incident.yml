@@ -1,7 +1,6 @@
 name: Incident
 description: A service is down or degraded, or data is at risk. Alerts open these through nbx-alerts; people use this form.
 title: "Incident: "
-type: Incident
 body:
   - type: markdown
     attributes:

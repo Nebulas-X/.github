@@ -1,7 +1,6 @@
 name: Agent brief
 description: One large item for one agent, with the paths it owns, where it works, its limits and when it is done.
 title: "Brief <id>: "
-type: Task
 body:
   - type: markdown
     attributes:
@@ -13,7 +12,6 @@ body:
     id: agent-id
     attributes:
       label: Id
-      placeholder: f01
     validations:
       required: true
   - type: dropdown
@@ -89,7 +87,7 @@ body:
     id: read-first
     attributes:
       label: 5. Read first
-      description: The workspace and repository instructions, the wave brief's sections, the package, each ADR by section, the naming page, the owner's pending list.
+      description: The workspace and repository instructions, the plan's sections, the package, each decision record by section, the naming standard, the owner's pending list.
     validations:
       required: true
   - type: textarea

@@ -1,8 +1,7 @@
 # Contributing to Nebulas X
 
 Nebulas X repositories are private and worked on by the company's own people and machine accounts. This page is the
-short version of the internal engineering handbook (`engineering/how-we-work.md` and `engineering/git-and-commits.md`),
-which wins wherever the two differ.
+short version of the company's internal engineering handbook, which wins wherever the two differ.
 
 ## How a change lands
 

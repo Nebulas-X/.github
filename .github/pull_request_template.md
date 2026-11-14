@@ -20,4 +20,4 @@ Closes #
 
 ## Brief
 
-<!-- For an agent's work: the brief's id and the wave record; otherwise «None». -->
+<!-- For an agent's work: the brief's id and its record; otherwise «None». -->

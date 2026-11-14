@@ -1,7 +1,6 @@
 name: Owner request
 description: A request from the owner, recorded at once in his own words.
 title: "Owner request: "
-type: Owner request
 labels:
   - source/owner
 body:
@@ -56,8 +55,7 @@ body:
     id: interim-id
     attributes:
       label: Interim id
-      description: The or-NNNN id, while the interim lists still exist.
-      placeholder: or-0000
+      description: The id in the interim list of requests, while that list still exists.
     validations:
       required: false
   - type: textarea
