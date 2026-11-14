@@ -1,0 +1,111 @@
+name: Agent brief
+description: One large item for one agent, with the paths it owns, where it works, its limits and when it is done.
+title: "Brief <id>: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        The brief's fields, in the order of the handbook's agent-brief template. Fill every field; write «none» where
+        nothing applies, so the agent sees it was considered. Link sources by path and section; never paste them.
+        The role file holds the rules that never change; the brief holds only this item's values.
+  - type: input
+    id: agent-id
+    attributes:
+      label: Id
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role
+      options:
+        - platform-engineer
+        - backend-engineer
+        - frontend-engineer
+        - design-system-engineer
+        - illustrator
+        - researcher
+        - reviewer
+        - translator
+    validations:
+      required: true
+  - type: dropdown
+    id: screenshot-cap
+    attributes:
+      label: Screenshot cap
+      description: 8, or 10 for the illustrator and the design-system engineer.
+      options:
+        - "8"
+        - "10"
+    validations:
+      required: true
+  - type: input
+    id: surface
+    attributes:
+      label: Surface
+      description: pages, screens or none (frontend-engineer only).
+      placeholder: none
+    validations:
+      required: true
+  - type: input
+    id: review-number
+    attributes:
+      label: Review number
+      description: The number on the batch's review page, with sub-numbers, for visible work; otherwise none.
+      placeholder: none
+    validations:
+      required: true
+  - type: textarea
+    id: item
+    attributes:
+      label: 1. Item
+      description: One large item in a short paragraph, its package (path and section), and what is out of scope.
+    validations:
+      required: true
+  - type: textarea
+    id: owned-paths
+    attributes:
+      label: 2. Owned paths
+      description: Per repository, and the handbook page if any. Everything else is read-only; root changes and errors in other files go in the report.
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: 3. Where you work
+      description: Repository and session; worktree, branch <type>/<issue>-<slug> and issue (one per repository); ports; data folder; toolchain.
+    validations:
+      required: true
+  - type: textarea
+    id: limits
+    attributes:
+      label: 4. Limits
+      description: Time box (1–1.5 h, a planning unit, never a cut-off); searches; git (none, or exactly what is allowed; never a merge).
+    validations:
+      required: true
+  - type: textarea
+    id: read-first
+    attributes:
+      label: 5. Read first
+      description: The workspace and repository instructions, the plan's sections, the package, each decision record by section, the naming standard, the owner's pending list.
+    validations:
+      required: true
+  - type: textarea
+    id: inputs
+    attributes:
+      label: 6. Inputs and gates
+      description: Waits on (owner items by id, packages, merges) and the fallback if late; data; capabilities with their parity methods.
+    validations:
+      required: true
+  - type: textarea
+    id: done-when
+    attributes:
+      label: 7. Done when
+      description: Each criterion with the command that proves it and the result that passes; tests with their repeats; the documentation; the handbook validator if a handbook file changes.
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: >-
+        **8. Final message:** the seven sections of the agent report, in order: 1. Summary, 2. Files written, 3. Checks
+        run, 4. Owner items, 5. Conflicts or errors, 6. What stays NOT VERIFIED, 7. Usage facts.

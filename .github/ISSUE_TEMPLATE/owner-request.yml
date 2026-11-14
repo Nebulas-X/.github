@@ -1,0 +1,67 @@
+name: Owner request
+description: A request from the owner, recorded at once in his own words.
+title: "Owner request: "
+labels:
+  - source/owner
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Record the request the moment it is made. Paste the owner's words exactly as he said or wrote them, in their
+        original language; summarise only in the field below. Never put a secret or personal data here.
+  - type: textarea
+    id: words
+    attributes:
+      label: The owner's words
+      description: Verbatim, unedited, in the original language.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary in English
+      description: One or two plain sentences saying what is asked.
+    validations:
+      required: true
+  - type: input
+    id: said-on
+    attributes:
+      label: Said on
+      description: The UTC date, YYYY-MM-DD.
+      placeholder: "2026-11-14"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      options:
+        - HQ session
+        - Production session
+        - Review page
+        - Repository session
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target date
+      description: The date he expects, if he gave one (YYYY-MM-DD). A moved date is reported to him at once.
+    validations:
+      required: false
+  - type: input
+    id: interim-id
+    attributes:
+      label: Interim id
+      description: The id in the interim list of requests, while that list still exists.
+    validations:
+      required: false
+  - type: textarea
+    id: related
+    attributes:
+      label: Related items
+      description: Decisions, issues and pull requests this touches.
+    validations:
+      required: false

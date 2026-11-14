@@ -1,0 +1,74 @@
+name: Bug
+description: Something does not work as it should.
+title: "Bug: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        For an outage or anything customers feel now, open an incident instead. Never put a secret, a key, personal
+        data or a customer record here: give identifiers, trace ids and log locations.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where
+      options:
+        - Website
+        - 3D studio
+        - Customer account
+        - Operations panel
+        - Workshop bridge
+        - Assistant
+        - API or worker
+        - Infrastructure
+        - CI or tooling
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - prod
+        - staging
+        - preview
+        - local
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Trace ids, log locations, the version or commit, screenshots without personal data.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: hygiene
+    attributes:
+      label: Data hygiene
+      options:
+        - label: This issue holds no secret, personal data or customer record.
+          required: true

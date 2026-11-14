@@ -1,0 +1,15 @@
+# Code owners of the public .github. GitHub reads this file only in this repository. The last matching line wins,
+# so the explicit lines follow the default; each area keeps its own line so that it can get its own owner later.
+# Machine accounts are never code owners.
+
+*                       @Nebulas-X/nbx-maintainers
+
+# The reusable workflows every repository calls, pinned by commit.
+/.github/workflows/     @Nebulas-X/nbx-maintainers
+
+# The organisation's default community files, templates and issue forms.
+/.github/ISSUE_TEMPLATE/ @Nebulas-X/nbx-maintainers
+/.github/*.md           @Nebulas-X/nbx-maintainers
+
+# This file.
+/.github/CODEOWNERS     @Nebulas-X/nbx-maintainers

@@ -1,0 +1,69 @@
+name: Incident
+description: A service is down or degraded, or data is at risk. Alerts open these through nbx-alerts; people use this form.
+title: "Incident: "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Open it now and fill in what you know; update it as you learn. A person adds the `sev/` label at triage.
+        Never put a secret, a key, personal data or a customer record here.
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - sev/1 · the service is down or data is lost for customers
+        - sev/2 · a main journey is degraded for customers
+        - sev/3 · a minor journey is degraded, with a workaround
+        - sev/4 · no customer impact yet
+    validations:
+      required: true
+  - type: input
+    id: started-at
+    attributes:
+      label: Started at
+      description: UTC, YYYY-MM-DD HH:MM, or «unknown».
+    validations:
+      required: true
+  - type: dropdown
+    id: detected-by
+    attributes:
+      label: Detected by
+      options:
+        - Alert
+        - Customer report
+        - Team member
+        - Provider notice
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Which service and journey, how many tenants or customers in numbers, and since when.
+    validations:
+      required: true
+  - type: textarea
+    id: actions
+    attributes:
+      label: Actions so far
+      description: What has been done, by whom (role, not name), and the current state. Fixes take the pipeline's fast lane; no manual change on any server.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: The alert, dashboards, trace ids and log locations.
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: follow-up
+    attributes:
+      label: Follow-up
+      options:
+        - label: A short post-mortem follows once the incident is resolved.
+          required: true
+        - label: This issue holds no secret, personal data or customer record.
+          required: true
