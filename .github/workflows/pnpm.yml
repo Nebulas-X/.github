@@ -1,0 +1,168 @@
+# pnpm: a pnpm workspace's supply-chain gate and its tasks (ADR-0018 «Build tooling», ADR-0021 «Supply chain»): pnpm's
+# settings asserted, the frozen-lockfile install, the registry-signature check, then Turborepo's tasks, only those
+# affected by the pull request against its merge base, or all of them on pushes, nightly and manual runs. Called pinned
+# by commit SHA. No secret.
+#
+# The signature check is `pnpm audit signatures`: it verifies the ECDSA registry signature of every package in the
+# lockfile and exits 1 on an invalid signature, or a missing one where the registry publishes keys (pnpm.io/cli/audit,
+# read on 14 November 2026). `npm audit signatures` also checks provenance attestations, but on pnpm's layout it audits
+# only the top-level packages (4 of 50 in nbx-platform on 14 November 2026), so it is not the gate.
+name: pnpm
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: The exact Node.js version (ADR-0011).
+        type: string
+        default: 26.13.1
+      pnpm-version:
+        description: The exact pnpm version; it must equal `packageManager` in the root package.json.
+        type: string
+        default: 12.18.0
+      pnpm-sha256:
+        description: The SHA-256 of pnpm-linux-x64.tar.gz for that version (GitHub's asset digest; immutable release).
+        type: string
+        default: 3726060e236c0db3e7124c0a5af123c840ba0cb76682149b63ea0baf290017c2
+      tasks:
+        description: The Turborepo tasks to run, separated by spaces.
+        type: string
+        default: lint typecheck test
+      root-scripts:
+        description: Root package.json scripts to run before the tasks, separated by spaces (formatting, root lint).
+        type: string
+        default: ''
+      affected:
+        description: Run only the tasks affected against the pull request's base (true on pull requests).
+        type: boolean
+        default: false
+      timeout-minutes:
+        description: The job's timeout (ADR-0032 «Timeouts»; 20 for unit and integration, 40 for end-to-end).
+        type: number
+        default: 20
+
+permissions: {}
+
+jobs:
+  pnpm:
+    name: pnpm
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      TURBO_TELEMETRY_DISABLED: '1'
+      DO_NOT_TRACK: '1'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          package-manager-cache: false
+
+      - name: Install pnpm
+        id: install-pnpm
+        shell: bash
+        env:
+          NBX_PNPM_VERSION: ${{ inputs.pnpm-version }}
+          NBX_PNPM_SHA256: ${{ inputs.pnpm-sha256 }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/pnpm.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" \
+            "https://github.com/pnpm/pnpm/releases/download/v${NBX_PNPM_VERSION}/pnpm-linux-x64.tar.gz"
+          echo "$NBX_PNPM_SHA256  $archive" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/pnpm"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/pnpm"
+          echo "$RUNNER_TEMP/pnpm" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/pnpm/pnpm" --version
+
+      - name: Check pnpm's settings
+        id: check-pnpm-settings
+        shell: node {0}
+        env:
+          NBX_PNPM_VERSION: ${{ inputs.pnpm-version }}
+        run: |
+          'use strict';
+          // ADR-0021 «Supply chain» and ADR-0018 Confirmation: pnpm's effective settings, as pnpm itself reads them.
+          const { execFileSync } = require('node:child_process');
+          const { readFileSync } = require('node:fs');
+          const config = JSON.parse(execFileSync('pnpm', ['config', 'list', '--json'], { encoding: 'utf8' }));
+          const problems = [];
+          const expect = (key, ok, wanted) => {
+            if (!ok(config[key])) problems.push(`${key} is ${JSON.stringify(config[key])}; ADR-0021 wants ${wanted}`);
+          };
+          expect('minimumReleaseAge', (value) => Number(value) >= 10080, 'at least 10080 (seven days, in minutes)');
+          expect('trustPolicy', (value) => value === 'no-downgrade', '«no-downgrade»');
+          expect('strictDepBuilds', (value) => value === true, 'true');
+          expect('dangerouslyAllowAllBuilds', (value) => value === undefined || value === false, 'false or unset');
+          expect('allowBuilds', (value) => value !== null && typeof value === 'object' && !Array.isArray(value), 'a reviewed map');
+          expect('blockExoticSubdeps', (value) => value === true, 'true');
+          expect('saveExact', (value) => value === true, 'true');
+          expect('engineStrict', (value) => value === true, 'true');
+          const manifest = JSON.parse(readFileSync('package.json', 'utf8'));
+          const wantedManager = `pnpm@${process.env.NBX_PNPM_VERSION}`;
+          if (!String(manifest.packageManager ?? '').startsWith(wantedManager)) {
+            problems.push(`packageManager is ${JSON.stringify(manifest.packageManager)}; it must pin ${wantedManager}`);
+          }
+          const exotic = /^(?:git\+|git:|github:|gitlab:|bitbucket:|https?:|file:.*\.t(?:ar\.)?gz$)/u;
+          const manifests = execFileSync('git', ['ls-files', '-z', '--', 'package.json', '**/package.json'], { encoding: 'utf8' }).split('\0').filter(Boolean);
+          for (const path of manifests) {
+            const pkg = JSON.parse(readFileSync(path, 'utf8'));
+            for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+              for (const [name, spec] of Object.entries(pkg[field] ?? {})) {
+                if (exotic.test(String(spec))) problems.push(`${path}: ${field}.${name} comes from «${spec}», not the registry`);
+              }
+            }
+          }
+          if (problems.length > 0) {
+            console.log('::error title=pnpm-settings::pnpm\'s supply-chain settings are missing or weakened (ADR-0021):');
+            for (const problem of problems) console.log(problem);
+            process.exit(1);
+          }
+          console.log(`pnpm's settings hold ADR-0021's policy; ${manifests.length} manifests take every dependency from the registry.`);
+
+      - name: Install with the frozen lockfile
+        id: install
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify registry signatures
+        id: audit-signatures
+        shell: bash
+        run: pnpm audit signatures
+
+      - name: Run the root scripts
+        id: root-scripts
+        shell: bash
+        env:
+          NBX_ROOT_SCRIPTS: ${{ inputs.root-scripts }}
+        run: |
+          set -euo pipefail
+          read -r -a scripts <<< "$NBX_ROOT_SCRIPTS"
+          for script in "${scripts[@]}"; do
+            echo "::group::pnpm run $script"
+            pnpm run "$script"
+            echo "::endgroup::"
+          done
+
+      - name: Run the tasks
+        id: tasks
+        shell: bash
+        env:
+          NBX_TASKS: ${{ inputs.tasks }}
+          NBX_AFFECTED: ${{ inputs.affected }}
+          TURBO_SCM_BASE: ${{ github.event.pull_request.base.sha }}
+          TURBO_SCM_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          read -r -a tasks <<< "$NBX_TASKS"
+          if [[ "$NBX_AFFECTED" == "true" ]]; then
+            pnpm exec turbo run "${tasks[@]}" --affected
+          else
+            pnpm exec turbo run "${tasks[@]}"
+          fi

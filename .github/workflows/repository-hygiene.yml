@@ -1,0 +1,323 @@
+# repository-hygiene: the repository checks every Nebulas X repository runs on each pull request, push and nightly
+# run: the branch name (naming page §3), LF line endings and path names (ADR-0018), unsafe files (ADR-0017), the
+# no-AI-authorship check (ADR-0023), Dependabot's seven-day cooldown (ADR-0021) and gitleaks (ADR-0021). Called pinned
+# by commit SHA. No secret: everything comes from the checkout and the caller's event payload, passed through the
+# environment, never interpolated into a script. Each check is one step, so a failure names its check.
+name: repository-hygiene
+
+on:
+  workflow_call:
+    inputs:
+      types:
+        description: The commit types a branch may start with, separated by spaces (naming page §3).
+        type: string
+        default: build chore ci docs feat fix perf refactor revert style test
+      bot-branch-prefixes:
+        description: Branch prefixes that tools mandate (Dependabot, release-please), separated by spaces.
+        type: string
+        default: dependabot/ release-please--
+      path-exceptions:
+        description: Extra tool-mandated file or folder names that may hold capitals, one per line.
+        type: string
+        default: ''
+      authorship-allow-list:
+        description: Paths the authorship check skips, one per line; each needs its reason beside the caller's input.
+        type: string
+        default: ''
+      require-dependabot:
+        description: Whether `.github/dependabot.yml` must exist (its cooldown is checked whenever it exists).
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  # gitleaks, by exact version and the SHA-256 of its Linux archive (GitHub's asset digest, equal to the release's
+  # checksums file; read on 14 November 2026). The organisation's gitleaks action needs a licence key, a secret these
+  # workflows never hold, so the binary runs directly.
+  NBX_GITLEAKS_URL: https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+  NBX_GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  hygiene:
+    name: hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the branch name
+        id: check-branch-name
+        shell: node {0}
+        env:
+          NBX_EVENT_NAME: ${{ github.event_name }}
+          NBX_BRANCH: ${{ github.head_ref }}
+          NBX_TYPES: ${{ inputs.types }}
+          NBX_BOT_PREFIXES: ${{ inputs.bot-branch-prefixes }}
+        run: |
+          'use strict';
+          const event = process.env.NBX_EVENT_NAME ?? '';
+          if (!event.startsWith('pull_request')) {
+            console.log(`Not a pull request (event «${event}»): the branch-name check applies to pull-request branches only.`);
+            process.exit(0);
+          }
+          const branch = process.env.NBX_BRANCH ?? '';
+          const types = (process.env.NBX_TYPES ?? '').split(/\s+/).filter(Boolean);
+          const botPrefixes = (process.env.NBX_BOT_PREFIXES ?? '').split(/\s+/).filter(Boolean);
+          const bot = botPrefixes.find((prefix) => branch.startsWith(prefix));
+          if (bot) {
+            console.log(`The branch «${branch}» carries the tool-mandated prefix «${bot}».`);
+            process.exit(0);
+          }
+          const pattern = new RegExp(`^(?:${types.join('|')})/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$`, 'u');
+          if (!pattern.test(branch)) {
+            console.log(`::error title=branch-name::The branch «${branch}» must read «<type>/<issue>-<slug>»: a type from ${types.join(', ')}, the issue number, and a lowercase kebab-case slug (naming page §3).`);
+            process.exit(1);
+          }
+          console.log(`The branch «${branch}» follows «<type>/<issue>-<slug>».`);
+
+      - name: Check line endings
+        id: check-line-endings
+        shell: node {0}
+        run: |
+          'use strict';
+          // Every tracked text file is LF only: no CR anywhere (ADR-0018). A file is binary when .gitattributes marks it
+          // -text (the binary list) or it holds a NUL byte in its first 8,000 bytes, as git itself decides.
+          const { execFileSync } = require('node:child_process');
+          const { existsSync, readFileSync } = require('node:fs');
+          const listing = execFileSync('git', ['ls-files', '-z', '--eol'], { encoding: 'utf8', maxBuffer: 1 << 28 }).split('\0').filter(Boolean);
+          const offenders = [];
+          for (const entry of listing) {
+            const tab = entry.indexOf('\t');
+            const attributes = entry.slice(0, tab);
+            const path = entry.slice(tab + 1);
+            if (/attr\/\S*-text/u.test(attributes) || !existsSync(path)) continue;
+            const bytes = readFileSync(path);
+            if (bytes.subarray(0, 8000).includes(0)) continue;
+            if (bytes.includes(0x0d)) offenders.push(path);
+          }
+          if (offenders.length > 0) {
+            console.log('::error title=line-endings::These tracked text files hold CR characters; the repository uses LF only (ADR-0018):');
+            for (const path of offenders) console.log(path);
+            process.exit(1);
+          }
+          console.log(`No tracked text file holds a CR character (${listing.length} files).`);
+
+      - name: Check path names
+        id: check-path-names
+        shell: node {0}
+        env:
+          NBX_PATH_EXCEPTIONS: ${{ inputs.path-exceptions }}
+        run: |
+          'use strict';
+          const { execFileSync } = require('node:child_process');
+          const toolMandated = [
+            'AGENTS.md', 'CHANGELOG.md', 'CLAUDE.md', 'CODEOWNERS', 'CODE_OF_CONDUCT.md', 'CONTRIBUTING.md',
+            'Cargo.lock', 'Cargo.toml', 'Containerfile', 'Dockerfile', 'FUNDING.yml', 'GOVERNANCE.md', 'ISSUE_TEMPLATE',
+            'LICENSE', 'LICENSE.md', 'MOVED.md', 'Makefile', 'NOTICE', 'PULL_REQUEST_TEMPLATE', 'PULL_REQUEST_TEMPLATE.md',
+            'README.md', 'SECURITY.md', 'SKILL.md', 'SUPPORT.md', 'THIRD_PARTY_NOTICES.md',
+          ];
+          const extra = (process.env.NBX_PATH_EXCEPTIONS ?? '').split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+          const exceptions = new Set([...toolMandated, ...extra]);
+          const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 }).split('\0').filter(Boolean);
+          const problems = [];
+          for (const path of files) {
+            if (/\s/u.test(path)) {
+              problems.push(`${path}: holds a space or other whitespace`);
+              continue;
+            }
+            const bad = path.split('/').filter((segment) => !exceptions.has(segment) && /[^a-z0-9._@+()[\]-]/u.test(segment));
+            if (bad.length > 0) problems.push(`${path}: «${bad.join('», «')}» holds capitals or characters outside lowercase ASCII`);
+          }
+          if (problems.length > 0) {
+            console.log('::error title=path-names::Paths must be lowercase ASCII without spaces (ADR-0018; naming page §1):');
+            for (const problem of problems) console.log(problem);
+            process.exit(1);
+          }
+          console.log(`All ${files.length} tracked paths are lowercase ASCII without spaces.`);
+
+      - name: Check for unsafe files
+        id: check-unsafe-files
+        shell: node {0}
+        run: |
+          'use strict';
+          const { execFileSync } = require('node:child_process');
+          const { existsSync, statSync } = require('node:fs');
+          const { basename, extname } = require('node:path');
+          const blockedExtensions = new Set(['.key', '.p12', '.pem', '.pfx']);
+          const maxBytes = 50 * 1024 * 1024;
+          const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 }).split('\0').filter(Boolean);
+          const problems = [];
+          for (const path of files) {
+            const name = basename(path);
+            if (blockedExtensions.has(extname(name).toLowerCase())) problems.push(`${path}: key or certificate file`);
+            if (name === '.env' || (name.startsWith('.env.') && name !== '.env.example')) problems.push(`${path}: environment file (only .env.example is allowed)`);
+            if (existsSync(path) && statSync(path).size > maxBytes) problems.push(`${path}: larger than 50 MB`);
+          }
+          if (problems.length > 0) {
+            console.log('::error title=unsafe-files::These files may not be committed (ADR-0017 «nbx-block-unsafe-files»):');
+            for (const problem of problems) console.log(problem);
+            process.exit(1);
+          }
+          console.log(`None of the ${files.length} tracked files is a key, an environment file or larger than 50 MB.`);
+
+      - name: Check for AI authorship marks
+        id: check-authorship
+        shell: node {0}
+        env:
+          NBX_EVENT_NAME: ${{ github.event_name }}
+          NBX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          NBX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          NBX_PR_BODY: ${{ github.event.pull_request.body }}
+          NBX_ALLOW_LIST: ${{ inputs.authorship-allow-list }}
+        run: |
+          'use strict';
+          // ADR-0023 «No AI authorship marks»: authorship positions only, never prose. The names mirror the handbook's
+          // maintained list (nbx-handbook tools/registries/lib/authorship.mjs); the two change together.
+          const { execFileSync } = require('node:child_process');
+          const { existsSync, readFileSync, statSync } = require('node:fs');
+          const { basename, extname } = require('node:path');
+          const anyCase = ['Anthropic', 'Claude', 'OpenAI', 'ChatGPT', 'GPT', 'Copilot', 'Gemini', 'DeepSeek', 'Qwen', 'Mixtral',
+            'Midjourney', 'DALL-E', 'DALL·E', 'Stable Diffusion', 'Codeium', 'Tabnine', 'CodeWhisperer', 'NotebookLM',
+            'artificial intelligence', 'inteligencia artificial', 'language model', 'language models', 'modelo de lenguaje'];
+          const capitalised = ['Opus', 'Sonnet', 'Haiku', 'Fable', 'Codex', 'Cursor', 'Windsurf', 'Mistral', 'Llama', 'Grok', 'xAI',
+            'Perplexity', 'Firefly', 'Bard', 'Antigravity', 'Aider', 'Cline', 'AI', 'A.I.', 'IA', 'LLM', 'LLMs'];
+          const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+');
+          const start = '(?<![\\p{L}\\p{N}_])';
+          const nameEnd = '(?![\\p{L}_])';
+          const aiAnyCase = new RegExp(`${start}(?:${anyCase.map(escape).join('|')})${nameEnd}`, 'iu');
+          const aiExactCase = new RegExp(`${start}(?:${capitalised.map(escape).join('|')})${nameEnd}`, 'u');
+          const aiTerm = (text) => (aiAnyCase.exec(text) ?? aiExactCase.exec(text))?.[0] ?? null;
+          const authorshipKey = /^\s*(?:[-*]\s+)?["']?(?:@?author|authors|maintainers?|contributors?|creator|creatortool|generator|generated[-_ ]?(?:by|with)|written[-_ ]?(?:by|with)|co-?authored-?by|assisted-?by|made[-_ ]?with)["']?\s*[:=]\s*(.*)$/iu;
+          const statement = /^(?:(?:this|the)\s+[\w-]+(?:\s+[\w-]+)?\s+(?:was\s+|is\s+|has\s+been\s+)?)?(?:auto-?generated|generated|written|authored|co-?authored|created|made|produced|drafted)\s+(?:entirely\s+|partly\s+)?(?:by|with|using|via)\b(.{0,80})/iu;
+          const commentPrefix = /^\s*(?:\/\/+|#+|\/\*+|\*+|<!--|--|;+|%)\s*/u;
+          const textExtensions = new Set(['.astro', '.cjs', '.css', '.cts', '.html', '.htm', '.js', '.json', '.jsx', '.md', '.mdx',
+            '.mjs', '.mts', '.py', '.rs', '.scss', '.sh', '.sql', '.svg', '.tf', '.toml', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml']);
+          const skipped = new Set(['pnpm-lock.yaml', 'package-lock.json', 'Cargo.lock']);
+          const allowList = new Set((process.env.NBX_ALLOW_LIST ?? '').split(/\r?\n/).map((path) => path.trim()).filter(Boolean));
+          const findings = [];
+          const checkLine = (where, raw) => {
+            const line = raw.replace(commentPrefix, '').replace(/^[^\p{L}@]+/u, '');
+            const key = authorshipKey.exec(line);
+            if (key && aiTerm(key[1])) return findings.push(`${where}: authorship field names «${aiTerm(key[1])}»`);
+            const tag = /@(?:author|maintainer|contributor|creator|generator)\b(.{0,80})/iu.exec(line);
+            if (tag && aiTerm(tag[1])) return findings.push(`${where}: documentation tag names «${aiTerm(tag[1])}»`);
+            const said = statement.exec(line);
+            if (said && aiTerm(said[1])) return findings.push(`${where}: attribution line names «${aiTerm(said[1])}»`);
+            return undefined;
+          };
+          const files = execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8', maxBuffer: 1 << 28 }).split('\0').filter(Boolean);
+          for (const path of files) {
+            const name = basename(path);
+            if (allowList.has(path) || skipped.has(name) || !existsSync(path)) continue;
+            if (!textExtensions.has(extname(name).toLowerCase()) && name !== 'CODEOWNERS') continue;
+            if (statSync(path).size > 1024 * 1024) continue;
+            const text = readFileSync(path, 'utf8');
+            if (name === 'package.json') {
+              try {
+                const manifest = JSON.parse(text);
+                for (const field of ['author', 'maintainers', 'contributors']) {
+                  const term = manifest[field] === undefined ? null : aiTerm(JSON.stringify(manifest[field]));
+                  if (term) findings.push(`${path}: the «${field}» field names «${term}»`);
+                }
+              } catch {
+                findings.push(`${path}: not valid JSON`);
+              }
+            }
+            // Markup only: prose that names the tag (a rule in a Markdown page) is not a mark.
+            const markup = ['.astro', '.htm', '.html', '.svg', '.xml'].includes(extname(name).toLowerCase());
+            if (markup && /<meta\b[^>]*\bname\s*=\s*["']?generator\b/iu.test(text)) findings.push(`${path}: a generator meta tag`);
+            text.split(/\r?\n/u).forEach((line, index) => checkLine(`${path}:${index + 1}`, line));
+          }
+          if ((process.env.NBX_EVENT_NAME ?? '').startsWith('pull_request')) {
+            const range = `${process.env.NBX_BASE_SHA}..${process.env.NBX_HEAD_SHA}`;
+            const log = execFileSync('git', ['log', '--format=%H%n%B%x00', range], { encoding: 'utf8', maxBuffer: 1 << 28 });
+            for (const entry of log.split('\0')) {
+              const [sha, ...body] = entry.trim().split('\n');
+              if (sha) body.forEach((line) => checkLine(`commit ${sha.slice(0, 12)}`, line));
+            }
+            (process.env.NBX_PR_BODY ?? '').split(/\r?\n/u).forEach((line) => checkLine('the pull request body', line));
+          }
+          if (findings.length > 0) {
+            console.log('::error title=authorship::AI authorship marks are not allowed (or-0022; ADR-0023):');
+            for (const finding of findings) console.log(finding);
+            process.exit(1);
+          }
+          console.log(`No AI authorship mark in ${files.length} tracked files${(process.env.NBX_EVENT_NAME ?? '').startsWith('pull_request') ? ', the commits or the pull request body' : ''}.`);
+
+      - name: Check Dependabot's cooldown
+        id: check-dependabot-cooldown
+        shell: node {0}
+        env:
+          NBX_REQUIRE_DEPENDABOT: ${{ inputs.require-dependabot }}
+        run: |
+          'use strict';
+          // ADR-0021 «Supply chain»: every update entry waits seven days (`cooldown.default-days: 7`), and no
+          // per-kind override is shorter. The file is Prettier-formatted YAML, read line by line.
+          const { existsSync, readFileSync } = require('node:fs');
+          const path = ['.github/dependabot.yml', '.github/dependabot.yaml'].find((candidate) => existsSync(candidate));
+          if (!path) {
+            if (process.env.NBX_REQUIRE_DEPENDABOT === 'true') {
+              console.log('::error title=dependabot-cooldown::.github/dependabot.yml is missing.');
+              process.exit(1);
+            }
+            console.log('No .github/dependabot.yml here, and this repository does not require one.');
+            process.exit(0);
+          }
+          const lines = readFileSync(path, 'utf8').split(/\r?\n/u);
+          const indent = (line) => /^ */u.exec(line)[0].length;
+          const starts = lines.flatMap((line, index) => (/^\s*-\s+package-ecosystem\s*:/u.test(line) ? [index] : []));
+          const problems = [];
+          if (starts.length === 0) problems.push('no update entry («- package-ecosystem:») found');
+          for (const first of starts) {
+            const dash = indent(lines[first]);
+            let last = first + 1;
+            while (last < lines.length && (lines[last].trim() === '' || lines[last].trim().startsWith('#') || indent(lines[last]) > dash)) last += 1;
+            const entry = lines.slice(first, last);
+            const ecosystem = /package-ecosystem\s*:\s*["']?([\w-]+)/u.exec(entry[0])[1];
+            const at = entry.findIndex((line) => /^\s*cooldown\s*:\s*(?:#.*)?$/u.test(line));
+            if (at < 0) {
+              problems.push(`${ecosystem} (line ${first + 1}): no «cooldown» block`);
+              continue;
+            }
+            const days = {};
+            for (const line of entry.slice(at + 1)) {
+              if (line.trim() === '') continue;
+              if (indent(line) <= indent(entry[at])) break;
+              const pair = /^\s*([\w-]+-days)\s*:\s*(\d+)\s*(?:#.*)?$/u.exec(line);
+              if (pair) days[pair[1]] = Number(pair[2]);
+            }
+            if (days['default-days'] !== 7) problems.push(`${ecosystem} (line ${first + 1}): cooldown.default-days is ${days['default-days'] ?? 'missing'}, not 7`);
+            for (const [key, value] of Object.entries(days)) {
+              if (key !== 'default-days' && value < 7) problems.push(`${ecosystem} (line ${first + 1}): cooldown.${key} is ${value}, under 7`);
+            }
+          }
+          if (problems.length > 0) {
+            console.log(`::error title=dependabot-cooldown::${path} breaks ADR-0021's seven-day cooldown:`);
+            for (const problem of problems) console.log(problem);
+            process.exit(1);
+          }
+          console.log(`${path}: all ${starts.length} update entries wait seven days.`);
+
+      - name: Scan for secrets with gitleaks
+        id: gitleaks
+        shell: bash
+        env:
+          NBX_EVENT_NAME: ${{ github.event_name }}
+          NBX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          NBX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 --output "$archive" "$NBX_GITLEAKS_URL"
+          echo "$NBX_GITLEAKS_SHA256  $archive" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          "$RUNNER_TEMP/gitleaks/gitleaks" dir --redact --no-banner --exit-code 1 .
+          if [[ "$NBX_EVENT_NAME" == pull_request* ]]; then
+            "$RUNNER_TEMP/gitleaks/gitleaks" git --redact --no-banner --exit-code 1 --log-opts="$NBX_BASE_SHA..$NBX_HEAD_SHA" .
+          fi
