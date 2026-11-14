@@ -1,0 +1,131 @@
+# workflow-security: the caller's workflows meet ADR-0017 «Actions» and ADR-0021 «Supply chain»: every `uses:` pinned
+# by a full commit SHA (an all-zero placeholder fails as an unreplaced pin), `permissions: {}` at the top, a timeout on
+# every job, no `pull_request_target`, no secret on a self-hosted job; then zizmor and actionlint. Called pinned by
+# commit SHA. No secret. The tools run as pinned, checksum-verified binaries, because the organisation's Actions
+# policy allows only GitHub's own actions, verified creators' and four named patterns (read on 14 November 2026).
+name: workflow-security
+
+on:
+  workflow_call:
+    inputs:
+      forbid-self-hosted:
+        description: Fail on any self-hosted runner label (true for nbx-infrastructure and the public .github; ADR-0017).
+        type: boolean
+        default: false
+
+permissions: {}
+
+env:
+  # Exact versions and the SHA-256 of each Linux archive (GitHub's asset digests; actionlint's also equals its
+  # checksums file; read on 14 November 2026).
+  NBX_ZIZMOR_URL: https://github.com/zizmorcore/zizmor/releases/download/v1.31.1/zizmor-x86_64-unknown-linux-gnu.tar.gz
+  NBX_ZIZMOR_SHA256: d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99
+  NBX_ACTIONLINT_URL: https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+  NBX_ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+
+jobs:
+  workflows:
+    name: workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check pins, permissions and timeouts
+        id: check-workflow-policy
+        shell: node {0}
+        env:
+          NBX_FORBID_SELF_HOSTED: ${{ inputs.forbid-self-hosted }}
+        run: |
+          'use strict';
+          // Reads Prettier-formatted workflows (two-space indent) line by line: jobs sit at indent 2, their keys at 4.
+          const { existsSync, readdirSync, readFileSync } = require('node:fs');
+          const dir = '.github/workflows';
+          const files = existsSync(dir) ? readdirSync(dir).filter((name) => /\.ya?ml$/u.test(name)).sort() : [];
+          const forbidSelfHosted = process.env.NBX_FORBID_SELF_HOSTED === 'true';
+          const problems = [];
+          for (const name of files) {
+            const path = `${dir}/${name}`;
+            const lines = readFileSync(path, 'utf8').split(/\r?\n/u);
+            const code = (line) => line.replace(/(?:^|\s)#.*$/u, '');
+            const trigger = (line) => /^\s*(?:-\s+)?["']?pull_request_target["']?\s*(?::.*)?$/u.test(line) || /^["']?on["']?\s*:.*\bpull_request_target\b/u.test(line);
+            lines.forEach((line, index) => {
+              const where = `${path}:${index + 1}`;
+              const use = /^\s*(?:-\s+)?uses:\s*["']?([^\s"'#]+)/u.exec(line);
+              if (use) {
+                const ref = use[1];
+                if (ref.startsWith('./') || ref.startsWith('$/')) return;
+                if (ref.startsWith('docker://')) {
+                  if (!/@sha256:[0-9a-f]{64}$/u.test(ref)) problems.push(`${where}: «${ref}» is not pinned by digest`);
+                  return;
+                }
+                const pinned = /^[\w.-]+\/[\w.-]+(?:\/[^@\s]+)?@([0-9a-f]{40})$/u.exec(ref);
+                if (!pinned) problems.push(`${where}: «${ref}» is not pinned by a full-length commit SHA`);
+                else if (/^0{40}$/u.test(pinned[1])) problems.push(`${where}: «${ref}» is an unreplaced placeholder pin`);
+              }
+              if (trigger(code(line))) problems.push(`${where}: pull_request_target is banned (ADR-0021)`);
+            });
+            if (!lines.some((line) => /^permissions:\s*\{\s*\}\s*(?:#.*)?$/u.test(line))) {
+              problems.push(`${path}: the top-level «permissions: {}» is missing`);
+            }
+            const jobsAt = lines.findIndex((line) => /^jobs:\s*(?:#.*)?$/u.test(line));
+            if (jobsAt < 0) continue;
+            let end = lines.findIndex((line, index) => index > jobsAt && /^\S/u.test(line));
+            if (end < 0) end = lines.length;
+            const heads = [];
+            for (let index = jobsAt + 1; index < end; index += 1) {
+              const head = /^ {2}([\w-]+):\s*(?:#.*)?$/u.exec(lines[index]);
+              if (head) heads.push({ job: head[1], at: index });
+            }
+            heads.forEach(({ job, at }, position) => {
+              const block = lines.slice(at + 1, position + 1 < heads.length ? heads[position + 1].at : end).map(code);
+              const calls = block.some((line) => /^ {4}uses:/u.test(line));
+              if (!calls && !block.some((line) => /^ {4}timeout-minutes:\s*\S/u.test(line))) {
+                problems.push(`${path}: job «${job}» has no timeout-minutes (ADR-0018; ADR-0032)`);
+              }
+              const runsOnAt = block.findIndex((line) => /^ {4}runs-on:/u.test(line));
+              let runsOn = runsOnAt < 0 ? '' : block[runsOnAt];
+              for (let next = runsOnAt + 1; runsOnAt >= 0 && next < block.length && (block[next].trim() === '' || /^ {5,}/u.test(block[next])); next += 1) runsOn += `\n${block[next]}`;
+              const selfHosted = /\bself-hosted\b/u.test(runsOn);
+              if (selfHosted && block.some((line) => /\bsecrets\./u.test(line))) {
+                problems.push(`${path}: job «${job}» runs self-hosted and reads a secret (ADR-0017 «CI runners»)`);
+              }
+              if (selfHosted && forbidSelfHosted) problems.push(`${path}: job «${job}» uses a self-hosted runner, forbidden here (ADR-0017)`);
+            });
+          }
+          if (problems.length > 0) {
+            console.log('::error title=workflow-policy::The workflows break ADR-0017 «Actions» or ADR-0021:');
+            for (const problem of problems) console.log(problem);
+            process.exit(1);
+          }
+          console.log(`${files.length} workflows: every action pinned by full SHA, permissions: {} at the top, a timeout on every job.`);
+
+      - name: Install zizmor and actionlint
+        id: install-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl --fail --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/zizmor.tar.gz" "$NBX_ZIZMOR_URL"
+          echo "$NBX_ZIZMOR_SHA256  $RUNNER_TEMP/zizmor.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/zizmor.tar.gz" -C "$RUNNER_TEMP/bin" zizmor
+          curl --fail --silent --show-error --location --retry 3 --output "$RUNNER_TEMP/actionlint.tar.gz" "$NBX_ACTIONLINT_URL"
+          echo "$NBX_ACTIONLINT_SHA256  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP/bin" actionlint
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Audit the workflows with zizmor
+        id: zizmor
+        shell: bash
+        run: zizmor --offline --no-progress --strict-collection .
+
+      - name: Lint the workflows with actionlint
+        id: actionlint
+        shell: bash
+        # actionlint 1.7.12, the latest release, predates GitHub's self-repository syntax (`uses: $/...`, July 2026),
+        # which zizmor's self-repository audit requires; this one message is ignored until an actionlint release
+        # understands it (then the -ignore goes).
+        run: actionlint -ignore 'reusable workflow call "\$/[^"]+" at "uses" is not following the format'
