@@ -40,6 +40,10 @@ on:
         description: The job's timeout (ADR-0032 «Timeouts»; 20 for unit and integration, 40 for end-to-end).
         type: number
         default: 20
+      runner:
+        description: The runner, a JSON string for fromJSON; "ubuntu-24.04" or the self-hosted ["self-hosted","nbx-ci"].
+        type: string
+        default: '"ubuntu-24.04"'
 
 permissions: {}
 
@@ -48,7 +52,7 @@ jobs:
     name: pnpm
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     env:
       TURBO_TELEMETRY_DISABLED: '1'

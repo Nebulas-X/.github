@@ -15,13 +15,17 @@ on:
         description: The longest title accepted, in characters.
         type: number
         default: 100
+      runner:
+        description: The runner, a JSON string for fromJSON; "ubuntu-24.04" or the self-hosted ["self-hosted","nbx-ci"].
+        type: string
+        default: '"ubuntu-24.04"'
 
 permissions: {}
 
 jobs:
   pr-title:
     name: pr-title
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 5
     steps:
       - name: Check that the title is a Conventional Commit
