@@ -3,15 +3,40 @@
 # every job, no `pull_request_target`, no secret on a self-hosted job; then zizmor and actionlint. Called pinned by
 # commit SHA. No secret. The tools run as pinned, checksum-verified binaries, because the organisation's Actions
 # policy allows only GitHub's own actions, verified creators' and four named patterns (read on 14 November 2026).
+#
+# The runners, in one of two modes, never both:
+# - forbid-self-hosted refuses every self-hosted label, in a job's runs-on or in a call's runner input (this public
+#   repository runs on GitHub-hosted runners only);
+# - allow-nbx-ci admits exactly [self-hosted, nbx-ci], the organisation's self-hosted label, and only for secret-free
+#   jobs. A job runs on ubuntu-24.04 or on exactly that pair, in that order, and a call's runner input is the JSON
+#   string "ubuntu-24.04" or ["self-hosted","nbx-ci"]; every other label, label set, runner group or expression fails.
+#   A job on the pair, or a call that passes it, fails when it reads the secrets context (in the job, or in the
+#   workflow's env and defaults), passes secrets to a call, names an environment, asks for a write permission or for
+#   id-token, runs one of the caller's secret commands (secret-commands), or runs on a pull_request trigger without the
+#   fork guard `github.event.pull_request.head.repo.full_name == github.repository` in its own if (as the whole
+#   condition or a top-level && conjunct, or `github.event_name != 'pull_request' || <the guard>`, whole or in
+#   parentheses as a conjunct).
 name: workflow-security
 
 on:
   workflow_call:
     inputs:
       forbid-self-hosted:
-        description: Fail on any self-hosted runner label (true for nbx-infrastructure and the public .github; ADR-0017).
+        description: Fail on any self-hosted runner label, in runs-on or a call's runner input (this public repository).
         type: boolean
         default: false
+      allow-nbx-ci:
+        description: Admit exactly [self-hosted, nbx-ci], the organisation's self-hosted label, for secret-free jobs only.
+        type: boolean
+        default: false
+      secret-commands:
+        description: Commands or script names a job on [self-hosted, nbx-ci] never runs, separated by spaces.
+        type: string
+        default: ''
+      runner:
+        description: The runner, a JSON string for fromJSON; "ubuntu-24.04" or the self-hosted ["self-hosted","nbx-ci"].
+        type: string
+        default: '"ubuntu-24.04"'
 
 permissions: {}
 
@@ -28,7 +53,7 @@ jobs:
     name: workflows
     permissions:
       contents: read
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(inputs.runner) }}
     timeout-minutes: 10
     steps:
       - name: Check out the repository
@@ -36,11 +61,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check pins, permissions and timeouts
+      - name: Check pins, permissions, timeouts and runners
         id: check-workflow-policy
         shell: node {0}
         env:
           NBX_FORBID_SELF_HOSTED: ${{ inputs.forbid-self-hosted }}
+          NBX_ALLOW_NBX_CI: ${{ inputs.allow-nbx-ci }}
+          NBX_SECRET_COMMANDS: ${{ inputs.secret-commands }}
         run: |
           'use strict';
           // Reads Prettier-formatted workflows (two-space indent) line by line: jobs sit at indent 2, their keys at 4.
@@ -48,11 +75,143 @@ jobs:
           const dir = '.github/workflows';
           const files = existsSync(dir) ? readdirSync(dir).filter((name) => /\.ya?ml$/u.test(name)).sort() : [];
           const forbidSelfHosted = process.env.NBX_FORBID_SELF_HOSTED === 'true';
+          const allowNbxCi = process.env.NBX_ALLOW_NBX_CI === 'true';
+          const secretCommands = (process.env.NBX_SECRET_COMMANDS ?? '').split(/\s+/u).filter(Boolean);
           const problems = [];
+          if (forbidSelfHosted && allowNbxCi) problems.push('forbid-self-hosted and allow-nbx-ci are both on; a caller chooses one mode');
+          // The admitted runners, the fork guard, and the opening of an expression (spelt in two parts, so that
+          // GitHub never reads this script as one).
+          const HOSTED = 'ubuntu-24.04';
+          const PAIR = ['self-hosted', 'nbx-ci'];
+          const OPEN = '$' + '{{';
+          const GUARD = 'github.event.pull_request.head.repo.full_name == github.repository';
+          const PUSH_OR_GUARD = `github.event_name != 'pull_request' || ${GUARD}`;
+          const RULE = 'a job on [self-hosted, nbx-ci] reads no secret, names no environment, writes nothing, asks for no id-token, runs no secret command and takes no pull request from a fork';
+          const isPair = (value) => Array.isArray(value) && value.length === 2 && value[0] === PAIR[0] && value[1] === PAIR[1];
+          const indent = (line) => /^ */u.exec(line)[0].length;
+          const code = (line) => line.replace(/(?:^|\s)#.*$/u, '');
+          // A YAML scalar as written: single quotes ('' is one quote), double quotes (JSON's escapes), or plain.
+          const scalar = (text) => {
+            const value = text.trim();
+            if (/^'[\s\S]*'$/u.test(value)) return value.slice(1, -1).replace(/''/gu, "'");
+            if (/^"[\s\S]*"$/u.test(value)) {
+              try {
+                return JSON.parse(value);
+              } catch {
+                return value;
+              }
+            }
+            return value;
+          };
+          // The lines under a key at index `at`: every following line indented deeper, blank lines included.
+          const children = (lines, at) => {
+            const out = [];
+            for (let next = at + 1; next < lines.length && (lines[next].trim() === '' || indent(lines[next]) > indent(lines[at])); next += 1) out.push(lines[next]);
+            return out;
+          };
+          // A job's key at indent 4: its inline value and the lines under it, or null.
+          const jobKey = (block, key) => {
+            const at = block.findIndex((line) => new RegExp(`^ {4}${key}:(?:\\s|$)`, 'u').test(line));
+            if (at < 0) return null;
+            return { inline: block[at].replace(new RegExp(`^ {4}${key}:\\s*`, 'u'), '').trim(), below: children(block, at) };
+          };
+          // runs-on as written: a label, a list of labels, a runner group or an expression.
+          const runnerOf = (key) => {
+            const { inline, below } = key;
+            if (inline.includes(OPEN)) return { kind: 'expression', text: inline };
+            if (inline.startsWith('{')) return { kind: 'runner group', text: inline };
+            if (inline.startsWith('[')) return { kind: 'label set', labels: inline.slice(1, -1).split(',').map(scalar).filter((label) => label !== ''), text: inline };
+            if (inline !== '') return { kind: 'label', labels: [scalar(inline)], text: inline };
+            const items = below.filter((line) => line.trim() !== '');
+            if (items.some((line) => line.includes(OPEN))) return { kind: 'expression', text: items.map((line) => line.trim()).join(' ') };
+            if (items.length > 0 && items.every((line) => /^\s*-\s/u.test(line))) {
+              const labels = items.map((line) => scalar(line.replace(/^\s*-\s+/u, '')));
+              return { kind: 'label set', labels, text: `[${labels.join(', ')}]` };
+            }
+            return { kind: 'runner group', text: items.map((line) => line.trim()).join(' ') };
+          };
+          const runnerAdmitted = (runner) => (runner.kind === 'label' && runner.labels[0] === HOSTED) || (runner.kind === 'label set' && isPair(runner.labels));
+          // A call's runner input, parsed as fromJSON parses it; undefined when it does not parse.
+          const callRunner = (block) => {
+            const withKey = jobKey(block, 'with');
+            if (!withKey) return null;
+            const line = withKey.below.find((entry) => /^ {6}runner:/u.test(entry));
+            if (!line) return null;
+            const text = code(line).replace(/^ {6}runner:\s*/u, '');
+            try {
+              return { text, value: JSON.parse(scalar(text)) };
+            } catch {
+              return { text, value: undefined };
+            }
+          };
+          // An if condition: the inline text, or a folded block's lines joined; then its one optional outer expression
+          // markers out, and every run of white space as one space.
+          const conditionOf = (key) => {
+            if (!key) return '';
+            const raw = /^[>|][+-]?$/u.test(key.inline) ? key.below.map((line) => line.trim()).join(' ') : scalar(key.inline);
+            return String(raw).trim().replace(/^\$\{\{([\s\S]*)\}\}$/u, '$1').replace(/\s+/gu, ' ').trim();
+          };
+          // The condition split at its top-level && (outside parentheses and quoted literals), or null when it holds a
+          // top-level ||.
+          const conjuncts = (condition) => {
+            const parts = [];
+            let depth = 0;
+            let quoted = false;
+            let start = 0;
+            for (let index = 0; index < condition.length; index += 1) {
+              const char = condition[index];
+              if (char === "'") quoted = !quoted;
+              if (quoted) continue;
+              if (char === '(') depth += 1;
+              if (char === ')') depth -= 1;
+              const pair = condition.slice(index, index + 2);
+              if (depth === 0 && pair === '||') return null;
+              if (depth === 0 && pair === '&&') {
+                parts.push(condition.slice(start, index).trim());
+                start = index + 2;
+                index += 1;
+              }
+            }
+            parts.push(condition.slice(start).trim());
+            return parts;
+          };
+          const forkGuarded = (condition) => {
+            if (condition.includes(OPEN) || condition.includes('}}')) return false;
+            if (condition === PUSH_OR_GUARD) return true;
+            const parts = conjuncts(condition);
+            return parts !== null && parts.some((part) => part === GUARD || part === `(${PUSH_OR_GUARD})`);
+          };
+          // The secrets context in an expression or a bare condition, string literals left out.
+          const readsSecrets = (text) => /(?:^|[^\w.])secrets(?!\w)/iu.test(text.replace(/'(?:[^']|'')*'/gu, "''"));
+          const secretReads = (lines) => {
+            const found = [];
+            for (const line of lines.map(code)) {
+              for (const match of line.matchAll(/\$\{\{([\s\S]*?)\}\}/gu)) if (readsSecrets(match[1])) found.push(match[0]);
+              const bare = /^\s*(?:-\s+)?if:\s*(.+)$/u.exec(line);
+              if (bare && !bare[1].includes(OPEN) && readsSecrets(bare[1])) found.push(bare[1].trim());
+            }
+            return found;
+          };
+          // A secret command: the word itself, as a command or a file name, once the shell's quotes and backslashes are
+          // out; comment lines are left out.
+          const escape = (word) => word.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+          const runsCommand = (lines, word) => {
+            const pattern = new RegExp(`(?:^|[^\\w.-])${escape(word)}(?![\\w.-])`, 'u');
+            return lines.some((line) => !/^\s*#/u.test(line) && pattern.test(line.replace(/["'\\]/gu, '')));
+          };
+          // The permissions a job asks for that a job on the pair may not hold.
+          const permissionAsks = (key) => {
+            if (!key) return [];
+            let pairs = [];
+            const inline = code(key.inline).trim();
+            if (inline === '') pairs = key.below.map(code).filter((line) => line.trim() !== '').map((line) => line.trim().split(/:\s*/u));
+            else if (inline.startsWith('{')) pairs = inline.slice(1, -1).split(',').filter((entry) => entry.trim() !== '').map((entry) => entry.trim().split(/:\s*/u));
+            else return inline === 'read-all' ? [] : [inline];
+            return pairs.filter(([scope, level]) => level === 'write' || (scope === 'id-token' && level !== 'none')).map(([scope, level]) => `${scope}: ${level}`);
+          };
           for (const name of files) {
             const path = `${dir}/${name}`;
             const lines = readFileSync(path, 'utf8').split(/\r?\n/u);
-            const code = (line) => line.replace(/(?:^|\s)#.*$/u, '');
             const trigger = (line) => /^\s*(?:-\s+)?["']?pull_request_target["']?\s*(?::.*)?$/u.test(line) || /^["']?on["']?\s*:.*\bpull_request_target\b/u.test(line);
             lines.forEach((line, index) => {
               const where = `${path}:${index + 1}`;
@@ -73,6 +232,13 @@ jobs:
             if (!lines.some((line) => /^permissions:\s*\{\s*\}\s*(?:#.*)?$/u.test(line))) {
               problems.push(`${path}: the top-level «permissions: {}» is missing`);
             }
+            // The workflow's top-level blocks: its triggers, and the env and defaults every job inherits.
+            const topBlock = (pattern) => {
+              const at = lines.findIndex((line) => pattern.test(line));
+              return at < 0 ? [] : [lines[at], ...children(lines, at)];
+            };
+            const onPullRequest = /(?:^|[^\w-])pull_request(?![\w-])/u.test(topBlock(/^["']?on["']?\s*:/u).map(code).join('\n'));
+            const inherited = [...topBlock(/^env:/u), ...topBlock(/^defaults:/u)];
             const jobsAt = lines.findIndex((line) => /^jobs:\s*(?:#.*)?$/u.test(line));
             if (jobsAt < 0) continue;
             let end = lines.findIndex((line, index) => index > jobsAt && /^\S/u.test(line));
@@ -83,19 +249,44 @@ jobs:
               if (head) heads.push({ job: head[1], at: index });
             }
             heads.forEach(({ job, at }, position) => {
-              const block = lines.slice(at + 1, position + 1 < heads.length ? heads[position + 1].at : end).map(code);
+              const raw = lines.slice(at + 1, position + 1 < heads.length ? heads[position + 1].at : end);
+              const block = raw.map(code);
               const calls = block.some((line) => /^ {4}uses:/u.test(line));
               if (!calls && !block.some((line) => /^ {4}timeout-minutes:\s*\S/u.test(line))) {
                 problems.push(`${path}: job «${job}» has no timeout-minutes (ADR-0018; ADR-0032)`);
               }
-              const runsOnAt = block.findIndex((line) => /^ {4}runs-on:/u.test(line));
-              let runsOn = runsOnAt < 0 ? '' : block[runsOnAt];
-              for (let next = runsOnAt + 1; runsOnAt >= 0 && next < block.length && (block[next].trim() === '' || /^ {5,}/u.test(block[next])); next += 1) runsOn += `\n${block[next]}`;
-              const selfHosted = /\bself-hosted\b/u.test(runsOn);
-              if (selfHosted && block.some((line) => /\bsecrets\./u.test(line))) {
+              const runsOnKey = jobKey(block, 'runs-on');
+              const runner = runsOnKey ? runnerOf(runsOnKey) : null;
+              const runsOnText = runsOnKey ? [runsOnKey.inline, ...runsOnKey.below].join('\n') : '';
+              const passed = calls ? callRunner(block) : null;
+              const selfHosted = /\bself-hosted\b/u.test(runsOnText) || (passed !== null && /\bself-hosted\b/u.test(passed.text));
+              // Without allow-nbx-ci, a self-hosted job only reads no secret; with it, the checks below are stricter.
+              if (!allowNbxCi && selfHosted && block.some((line) => /\bsecrets\./u.test(line))) {
                 problems.push(`${path}: job «${job}» runs self-hosted and reads a secret (ADR-0017 «CI runners»)`);
               }
               if (selfHosted && forbidSelfHosted) problems.push(`${path}: job «${job}» uses a self-hosted runner, forbidden here (ADR-0017)`);
+              if (!allowNbxCi) return;
+              if (runner && !runnerAdmitted(runner)) {
+                const form = { label: 'the label', 'label set': 'the label set', 'runner group': 'a runner group,', expression: 'an expression,' }[runner.kind];
+                problems.push(`${path}: job «${job}» runs on ${form} ${runner.text}; only ubuntu-24.04 or exactly [self-hosted, nbx-ci] is admitted`);
+              }
+              if (passed && !(passed.value === HOSTED || isPair(passed.value))) {
+                problems.push(`${path}: job «${job}» passes the runner ${passed.text}; the runner input is the JSON string "ubuntu-24.04" or ["self-hosted","nbx-ci"], never an expression or another label`);
+              }
+              const onPair = (runner && runner.kind === 'label set' && isPair(runner.labels)) || (passed !== null && isPair(passed.value));
+              if (!onPair) return;
+              const refuse = (reason) => problems.push(`${path}: job «${job}» runs on [self-hosted, nbx-ci] and ${reason}; ${RULE}`);
+              for (const read of secretReads(raw)) refuse(`reads the secrets context (${read})`);
+              for (const read of secretReads(inherited)) refuse(`inherits the workflow's env or defaults, which read the secrets context (${read})`);
+              if (jobKey(block, 'secrets')) refuse('passes secrets to the called workflow');
+              if (jobKey(block, 'environment')) refuse('names an environment');
+              for (const ask of permissionAsks(jobKey(block, 'permissions'))) refuse(`asks for ${ask}`);
+              for (const word of secretCommands) {
+                if (runsCommand(block, word) || runsCommand(inherited.map(code), word)) refuse(`runs the secret command ${word}`);
+              }
+              if (onPullRequest && !forkGuarded(conditionOf(jobKey(block, 'if')))) {
+                refuse(`runs on a pull_request trigger without the fork guard ${GUARD} in its own if`);
+              }
             });
           }
           if (problems.length > 0) {
@@ -103,7 +294,7 @@ jobs:
             for (const problem of problems) console.log(problem);
             process.exit(1);
           }
-          console.log(`${files.length} workflows: every action pinned by full SHA, permissions: {} at the top, a timeout on every job.`);
+          console.log(`${files.length} workflows: every action pinned by full SHA, permissions: {} at the top, a timeout on every job, the runners admitted.`);
 
       - name: Install zizmor and actionlint
         id: install-tools
