@@ -95,8 +95,9 @@ const callJob = ({
   runner = PAIR_INPUT,
   permissions = '    permissions:\n      contents: read\n',
   extra = '',
+  uses = `Nebulas-X/.github/.github/workflows/workflow-security.yml@${SHA}`,
 } = {}) =>
-  `  security:\n${cond === null ? '' : `    if: ${cond}\n`}    uses: Nebulas-X/.github/.github/workflows/workflow-security.yml@${SHA}\n${permissions}${extra}${runner === null ? '' : `    with:\n      runner: ${runner}\n`}`;
+  `  security:\n${cond === null ? '' : `    if: ${cond}\n`}    uses: ${uses}\n${permissions}${extra}${runner === null ? '' : `    with:\n      runner: ${runner}\n`}`;
 
 // A hosted job keeps every right: a secret, an environment, write permissions, id-token and a secret command.
 const hostedJob = `  hosted:
@@ -116,12 +117,13 @@ const hostedJob = `  hosted:
 const callerWorkflow = ({ on = PULL_AND_PUSH, env = '', jobs = [labelJob(), callJob(), hostedJob] } = {}) =>
   `name: ci\non:\n${on}\npermissions: {}\n${env}jobs:\n${jobs.join('')}`;
 
+// commands: null leaves NBX_SECRET_COMMANDS out of the step's environment, as when nothing sets it.
 const runners = (text, { forbid = 'false', allow = 'true', commands = COMMANDS } = {}) => {
   const dir = fixtureDir('workflow-runners');
   writeFiles(dir, { '.github/workflows/ci.yml': text });
   return runStep('workflow-security.yml', 'check-workflow-policy', {
     cwd: dir,
-    env: { NBX_FORBID_SELF_HOSTED: forbid, NBX_ALLOW_NBX_CI: allow, NBX_SECRET_COMMANDS: commands },
+    env: { NBX_FORBID_SELF_HOSTED: forbid, NBX_ALLOW_NBX_CI: allow, NBX_SECRET_COMMANDS: commands ?? undefined },
   });
 };
 
@@ -324,9 +326,6 @@ test("allow-nbx-ci refuses the caller's secret commands on [self-hosted, nbx-ci]
     ],
     ['a longer name that only contains one', ONLY([labelJob({ steps: '      - run: fake-vault-cli-docs\n' })])],
   ]);
-  mustPass([['no secret commands given', ONLY([labelJob({ steps: '      - run: fake-vault-cli list\n' })])]], {
-    commands: '',
-  });
   mustFail([
     [
       'a command',
@@ -347,6 +346,52 @@ test("allow-nbx-ci refuses the caller's secret commands on [self-hosted, nbx-ci]
       'a command in the workflow env',
       callerWorkflow({ env: 'env:\n  TOOL: fake-vault-cli\n', jobs: [labelJob()] }),
       /runs the secret command fake-vault-cli/u,
+    ],
+  ]);
+});
+
+test('allow-nbx-ci needs the secret commands: an empty, blank or missing list fails', LIMITS, () => {
+  const NEEDS = /allow-nbx-ci needs secret-commands/u;
+  const running = ONLY([labelJob({ steps: '      - run: fake-vault-cli list\n' })]);
+  for (const [label, commands] of [
+    ['an empty list', ''],
+    ['a blank list', ' \t '],
+    ['no list at all', null],
+  ]) {
+    mustFail([[label, running, NEEDS]], { commands });
+  }
+  const hosted = ONLY([labelJob({ cond: null, runsOn: 'ubuntu-24.04' })]);
+  mustPass([['no list without allow-nbx-ci', hosted]], { allow: 'false', commands: null });
+  mustPass([['no list under forbid-self-hosted', hosted]], { forbid: 'true', allow: 'false', commands: '' });
+});
+
+test('a call to this check declares the secret commands in secret-commands without running them', LIMITS, () => {
+  const declaring = (inputs, uses) =>
+    callJob({
+      runner: null,
+      uses,
+      extra: `    with:\n      runner: ${PAIR_INPUT}\n      allow-nbx-ci: true\n${inputs}`,
+    });
+  const LIST = `      secret-commands: ${COMMANDS}\n`;
+  mustPass([
+    ['the list on one line', ONLY([declaring(LIST)])],
+    [
+      'the list folded',
+      ONLY([declaring('      secret-commands: >-\n        fake-vault-cli\n        fake-helper.sh\n')]),
+    ],
+  ]);
+  const RUNS = /runs the secret command fake-vault-cli/u;
+  mustFail([
+    ['a secret command in another input of the call', ONLY([declaring(`${LIST}      tool: fake-vault-cli\n`)]), RUNS],
+    [
+      'the list on a call to another workflow',
+      ONLY([declaring(LIST, `Nebulas-X/.github/.github/workflows/repository-hygiene.yml@${SHA}`)]),
+      RUNS,
+    ],
+    [
+      'this check pinned by a tag',
+      ONLY([declaring(LIST, 'Nebulas-X/.github/.github/workflows/workflow-security.yml@v1')]),
+      RUNS,
     ],
   ]);
 });

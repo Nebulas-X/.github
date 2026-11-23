@@ -16,6 +16,9 @@
 #   fork guard `github.event.pull_request.head.repo.full_name == github.repository` in its own if (as the whole
 #   condition or a top-level && conjunct, or `github.event_name != 'pull_request' || <the guard>`, whole or in
 #   parentheses as a conjunct).
+#   allow-nbx-ci needs secret-commands, the caller's list, non-empty. A call to this check, pinned by full commit SHA,
+#   declares that list in its input secret-commands: the entry names the commands without running them, so the scan
+#   leaves it out and reads the call's other inputs.
 name: workflow-security
 
 on:
@@ -30,7 +33,7 @@ on:
         type: boolean
         default: false
       secret-commands:
-        description: Commands or script names a job on [self-hosted, nbx-ci] never runs, separated by spaces.
+        description: Commands or script names a job on [self-hosted, nbx-ci] never runs, separated by spaces; required with allow-nbx-ci.
         type: string
         default: ''
       runner:
@@ -79,6 +82,7 @@ jobs:
           const secretCommands = (process.env.NBX_SECRET_COMMANDS ?? '').split(/\s+/u).filter(Boolean);
           const problems = [];
           if (forbidSelfHosted && allowNbxCi) problems.push('forbid-self-hosted and allow-nbx-ci are both on; a caller chooses one mode');
+          if (allowNbxCi && secretCommands.length === 0) problems.push('allow-nbx-ci needs secret-commands: the commands and script names a job on [self-hosted, nbx-ci] never runs, separated by spaces');
           // The admitted runners, the fork guard, and the opening of an expression (spelt in two parts, so that
           // GitHub never reads this script as one).
           const HOSTED = 'ubuntu-24.04';
@@ -199,6 +203,17 @@ jobs:
             const pattern = new RegExp(`(?:^|[^\\w.-])${escape(word)}(?![\\w.-])`, 'u');
             return lines.some((line) => !/^\s*#/u.test(line) && pattern.test(line.replace(/["'\\]/gu, '')));
           };
+          // A call to this check, pinned by full commit SHA, declares the caller's secret commands in its input
+          // secret-commands: that entry, folded lines included, names them without running them, so the scan leaves it
+          // out. The call's other inputs, and the same input on a call to any other workflow, are read.
+          const SELF = /^ {4}uses:\s*["']?Nebulas-X\/\.github\/\.github\/workflows\/workflow-security\.yml@[0-9a-f]{40}["']?\s*$/u;
+          const withoutDeclaration = (block) => {
+            const withAt = block.findIndex((line) => /^ {4}with:\s*$/u.test(line));
+            if (withAt < 0 || !block.some((line) => SELF.test(line))) return block;
+            const end = withAt + 1 + children(block, withAt).length;
+            const at = block.findIndex((line, index) => index > withAt && index < end && /^ {6}secret-commands:(?:\s|$)/u.test(line));
+            return at < 0 ? block : [...block.slice(0, at), ...block.slice(at + 1 + children(block, at).length)];
+          };
           // The permissions a job asks for that a job on the pair may not hold.
           const permissionAsks = (key) => {
             if (!key) return [];
@@ -281,8 +296,9 @@ jobs:
               if (jobKey(block, 'secrets')) refuse('passes secrets to the called workflow');
               if (jobKey(block, 'environment')) refuse('names an environment');
               for (const ask of permissionAsks(jobKey(block, 'permissions'))) refuse(`asks for ${ask}`);
+              const scanned = calls ? withoutDeclaration(block) : block;
               for (const word of secretCommands) {
-                if (runsCommand(block, word) || runsCommand(inherited.map(code), word)) refuse(`runs the secret command ${word}`);
+                if (runsCommand(scanned, word) || runsCommand(inherited.map(code), word)) refuse(`runs the secret command ${word}`);
               }
               if (onPullRequest && !forkGuarded(conditionOf(jobKey(block, 'if')))) {
                 refuse(`runs on a pull_request trigger without the fork guard ${GUARD} in its own if`);
